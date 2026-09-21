@@ -1,2 +1,3 @@
 # UNI-LU_MCYSD1
-Semester 1 Project (EScape Room?)
+Hello guys, welcome to the shared space :)
+-Derek
