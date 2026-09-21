@@ -7,9 +7,9 @@ def check_word_length(word):
 
 def run_tests():
     #Three fixed strings for testing mode
-    test_words = ["Hello", "Python", "Homework"]
+    TEST_WORDS = ["Hello", "Python", "Homework"]
     print("Running test with hard-coded strings")
-    for word in test_words:
+    for word in TEST_WORDS:
         result = check_word_length(word)
         print(f" '{word}' ({len(word)} letters): {result}")
 
