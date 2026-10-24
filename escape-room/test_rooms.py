@@ -2,6 +2,7 @@ import unittest
 
 from escaperoom.rooms.malware import is_exfiltration, dfs_path, bfs_path
 from escaperoom.rooms.dns import decode_value, solve_dns
+from escaperoom.rooms.final_gate import build_message, compute_hmac, solve_final_gate
 
 
 class TestMalware(unittest.TestCase):
@@ -41,6 +42,31 @@ class TestDns(unittest.TestCase):
     def test_token_tag_chooses_the_hint(self):
         lines = solve_dns("data/dns.cfg")
         self.assertEqual(lines[1], "EVIDENCE[DNS].KEY=hint5")
+
+
+class TestFinalGate(unittest.TestCase):
+
+    def test_message_follows_token_order(self):
+        tokens = {"A": "x", "B": "y"}
+        self.assertEqual(build_message("g1", ["B", "A"], tokens), "g1|y-x")
+
+    def test_missing_token_raises_error(self):
+        with self.assertRaises(ValueError):
+            build_message("g1", ["A", "B"], {"A": "x"})
+
+    def test_hmac_known_example(self):
+        # A well-known HMAC-SHA256 example (Wikipedia)
+        digest = compute_hmac("key", "The quick brown fox jumps over the lazy dog")
+        self.assertEqual(digest, "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+
+    def test_output_lines_format(self):
+        tokens = {"DNS": "a", "PID": "b", "SAFE": "c", "KEYPAD": "d"}
+        lines = solve_final_gate("data/final_gate.txt", tokens)
+        self.assertEqual(lines[0], "FINAL_GATE=PENDING")
+        self.assertTrue(lines[1].startswith("MSG="))
+        digest = lines[2].replace("HMAC=", "")
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(digest, digest.lower())
 
 
 if __name__ == "__main__":
