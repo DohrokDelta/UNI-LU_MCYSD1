@@ -1,0 +1,255 @@
+import io
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+
+from escaperoom.engine import GameEngine
+from escaperoom.rooms import dns, final_gate, malware, soc, vault
+
+#So, I added this just to test out the game functionality very quickly (but i think it took longer to make this than the tests themselves), its not part of the main project and is inaccessible during gameplay but felt relevant to include the tests themselves.
+
+DATA_DIR = Path(__file__).parent / "data"
+
+
+class TestGameSession(unittest.TestCase):
+    def test_visit_rooms_collect_tokens_and_escape(self):
+        game = GameEngine(data_dir=str(DATA_DIR))
+        lobby_hint = io.StringIO()
+        with redirect_stdout(lobby_hint):
+            game.process_command("hint")
+        self.assertIn("doors are tagged soc, dns, vault, malware, final", lobby_hint.getvalue())
+        self.assertFalse(game.game_state.inventory)
+
+        initial_inventory = io.StringIO()
+        with redirect_stdout(initial_inventory):
+            game.process_command("inventory")
+        self.assertIn("haven't collected any tokens yet", initial_inventory.getvalue())
+
+        room_sequence = [
+            ("soc", "soc_desk", "monitor", "soc_token"),
+            ("dns", "dns_server", "console", "dns_token"),
+            ("vault", "vault_corridor", "terminal", "vault_token"),
+            ("malware", "malware_lab", "screens", "malware_token"),
+        ]
+
+        for exit_name, room_name, inspectable_item, token in room_sequence:
+            with self.subTest(room=room_name):
+                movement = io.StringIO()
+                with redirect_stdout(movement):
+                    self.assertTrue(game.process_command(f"move {exit_name}"))
+
+                self.assertEqual(game.game_state.current_room, room_name)
+                room = game.get_current_room()
+                self.assertIn(f"You enter the {room.name}.", movement.getvalue())
+                self.assertEqual(room.item_name, token)
+                self.assertEqual(room.inspectable_item, inspectable_item)
+
+                hint_output = io.StringIO()
+                with redirect_stdout(hint_output):
+                    game.process_command("hint")
+                self.assertIn(room.hint_dialog, hint_output.getvalue())
+                self.assertFalse(room.interacted)
+                self.assertNotIn(token, game.game_state.inventory)
+
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    game.process_command(f"inspect {inspectable_item}")
+
+                self.assertIn(f"You acquired: {token}", output.getvalue())
+                self.assertIn(token, game.game_state.inventory)
+                self.assertTrue(room.interacted)
+                self.assertEqual(room.look(), room.post_interact_dialog)
+
+                inventory_output = io.StringIO()
+                with redirect_stdout(inventory_output):
+                    game.process_command("inventory")
+                self.assertIn(token, inventory_output.getvalue())
+
+                with redirect_stdout(io.StringIO()):
+                    game.process_command("move lobby")
+                self.assertEqual(game.game_state.current_room, "lobby")
+
+        self.assertEqual(
+            game.game_state.inventory,
+            [token for _, _, _, token in room_sequence],
+        )
+
+        movement = io.StringIO()
+        with redirect_stdout(movement):
+            game.process_command("move final")
+        self.assertEqual(game.game_state.current_room, "final_gate")
+        self.assertIn("You enter the An Ominous Gate", movement.getvalue())
+        hint_output = io.StringIO()
+        with redirect_stdout(hint_output):
+            game.process_command("hint")
+        self.assertIn("interact with the terminal", hint_output.getvalue())
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            game.process_command("inspect terminal")
+
+        self.assertTrue(game.game_state.game_won)
+        self.assertIn("Congratulations! You've escaped", output.getvalue())
+        tokens = {
+            "DNS": self._token_value(dns.solve_dns(str(DATA_DIR / "dns.cfg")), "DNS"),
+            "PID": self._token_value(
+                malware.solve_malware(str(DATA_DIR / "proc_tree.jsonl")), "PID"
+            ),
+            "SAFE": self._token_value(
+                vault.solve_vault(str(DATA_DIR / "vault_dump.txt")), "SAFE"
+            ),
+            "KEYPAD": self._token_value(
+                soc.solve_soc(str(DATA_DIR / "auth.log")), "KEYPAD"
+            ),
+        }
+        expected_gate_lines = final_gate.solve_final_gate(
+            str(DATA_DIR / "final_gate.txt"), tokens
+        )
+        for line in expected_gate_lines:
+            self.assertIn(line, output.getvalue())
+        self.assertRegex(
+            expected_gate_lines[2],
+            r"^HMAC=[0-9a-f]{64}$",
+        )
+        inventory_output = io.StringIO()
+        with redirect_stdout(inventory_output):
+            game.process_command("inventory")
+        self.assertIn("escape_key", inventory_output.getvalue())
+
+    @staticmethod
+    def _token_value(lines, token_name):
+        prefix = f"TOKEN[{token_name}]="
+        token_line = next(line for line in lines if line.startswith(prefix))
+        return token_line[len(prefix):]
+
+    def test_puzzle_results_match_final_gate_token_order(self):
+        dns_lines = dns.solve_dns(str(DATA_DIR / "dns.cfg"))
+        malware_lines = malware.solve_malware(str(DATA_DIR / "proc_tree.jsonl"))
+
+        tokens = {
+            "DNS": self._token_value(dns_lines, "DNS"),
+            "PID": self._token_value(malware_lines, "PID"),
+            "SAFE": self._token_value(
+                vault.solve_vault(str(DATA_DIR / "vault_dump.txt")), "SAFE"
+            ),
+            "KEYPAD": self._token_value(
+                soc.solve_soc(str(DATA_DIR / "auth.log")), "KEYPAD"
+            ),
+        }
+        gate_lines = final_gate.solve_final_gate(
+            str(DATA_DIR / "final_gate.txt"),
+            tokens,
+        )
+
+        gate_settings = final_gate.read_gate_file(str(DATA_DIR / "final_gate.txt"))
+        token_order = [
+            name.strip() for name in gate_settings["token_order"].split(",")
+        ]
+        expected_message = (
+            f"MSG={gate_settings['group_id']}|"
+            + "-".join(tokens[name] for name in token_order)
+        )
+        self.assertEqual(gate_lines[1], expected_message)
+
+    def test_interactions_write_each_required_transcript_tag_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            transcript = Path(temp_dir) / "run.txt"
+            game = GameEngine(data_dir=str(DATA_DIR), transcript_file=str(transcript))
+            room_sequence = [
+                ("soc", "monitor"),
+                ("dns", "console"),
+                ("vault", "terminal"),
+                ("malware", "screens"),
+            ]
+
+            with redirect_stdout(io.StringIO()):
+                game.process_command("hint")
+                game.process_command("inventory")
+
+            for destination, interactable in room_sequence:
+                with redirect_stdout(io.StringIO()):
+                    game.process_command(f"move {destination}")
+                    game.process_command("hint")
+                    game.process_command(f"inspect {interactable}")
+                    game.process_command("inventory")
+                    game.process_command("move lobby")
+
+            with redirect_stdout(io.StringIO()):
+                game.process_command("move final")
+                game.process_command("hint")
+                game.process_command("inspect terminal")
+                game.process_command("inventory")
+
+            lines = transcript.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(any("You feel an ominous wind" in line for line in lines))
+            self.assertTrue(any("haven't collected any tokens yet" in line for line in lines))
+            self.assertTrue(any("Collected tokens:" in line for line in lines))
+            required_tags = [
+                "TOKEN[KEYPAD]",
+                "EVIDENCE[KEYPAD].TOP24",
+                "EVIDENCE[KEYPAD].COUNT",
+                "EVIDENCE[KEYPAD].SAMPLE",
+                "EVIDENCE[KEYPAD].MALFORMED_SKIPPED",
+                "TOKEN[DNS]",
+                "EVIDENCE[DNS].KEY",
+                "EVIDENCE[DNS].ENCODING",
+                "EVIDENCE[DNS].DECODED_LINE",
+                "TOKEN[SAFE]",
+                "EVIDENCE[SAFE].MATCH",
+                "EVIDENCE[SAFE].CHECK",
+                "TOKEN[PID]",
+                "EVIDENCE[PID].PATH",
+                "EVIDENCE[PID].CMD",
+                "EVIDENCE[PID].MALFORMED_SKIPPED",
+                "FINAL_GATE",
+                "MSG",
+                "HMAC",
+            ]
+            for tag in required_tags:
+                with self.subTest(tag=tag):
+                    self.assertEqual(
+                        sum(line.startswith(f"{tag}=") for line in lines),
+                        1,
+                    )
+
+            self.assertTrue(game.game_state.game_won)
+
+    def test_save_and_load_add_txt_extension_automatically(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game = GameEngine(data_dir=str(DATA_DIR))
+            save_name = str(Path(temp_dir) / "progress")
+            save_path = Path(save_name + ".txt")
+            game.game_state.current_room = "soc_desk"
+
+            save_output = io.StringIO()
+            with redirect_stdout(save_output):
+                game.save_game(save_name)
+            self.assertTrue(save_path.exists())
+            self.assertIn(f"Game saved to {save_path}", save_output.getvalue())
+
+            game.game_state.current_room = "lobby"
+            load_output = io.StringIO()
+            with redirect_stdout(load_output):
+                game.load_game(save_name)
+            self.assertEqual(game.game_state.current_room, "soc_desk")
+            self.assertIn(f"Game loaded from {save_path}", load_output.getvalue())
+
+    def test_save_and_load_reject_names_with_extensions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            game = GameEngine(data_dir=str(DATA_DIR))
+            save_name_with_extension = str(Path(temp_dir) / "progress.json")
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                game.save_game(save_name_with_extension)
+                game.load_game(save_name_with_extension)
+
+            self.assertIn("Invalid save name", output.getvalue())
+            self.assertIn("Invalid load name", output.getvalue())
+            self.assertFalse(Path(save_name_with_extension).exists())
+            self.assertFalse(Path(temp_dir, "progress.json.txt").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
