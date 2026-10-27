@@ -24,29 +24,29 @@ EVIDENCE[SAFE].MATCH must preserve the spacing of the text that your regex match
 # Regex
 import re
 
-def main():
-    #TODO REMOVE AND ADD TO GAME MENU
-    log_file = "data/vault_dump.txt"
-    
-    # Setup the pattern
+
+def solve_vault(log_file):
     pattern = re.compile(r'SAFE\s*\{\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*\}')
-    
+
     with open(log_file, 'r') as f:
         for line in f:
-            # Only scan the lines that match the specified pattern
             match = pattern.search(line)
             if match:
                 a = int(match.group(1))
                 b = int(match.group(2))
                 c = int(match.group(3))
-                # Check if the line satisfies the requirements
                 if a + b == c:
-                    # Dump the result
-                    print("TOKEN[SAFE]=" + str(a) + "-" + str(b) + "-" + str(c))
-                    print("EVIDENCE[SAFE].MATCH=\"" + match.group(0) + "\"")
-                    print("EVIDENCE[SAFE].CHECK=" + str(a) + "+" + str(b) + "=" + str(c))
-                    break
+                    return [
+                        f"TOKEN[SAFE]={a}-{b}-{c}",
+                        f'EVIDENCE[SAFE].MATCH="{match.group(0)}"',
+                        f"EVIDENCE[SAFE].CHECK={a}+{b}={c}",
+                    ]
+    raise ValueError("No valid SAFE candidate found in " + log_file)
+
+
+def main(log_file="data/vault_dump.txt"):
+    for line in solve_vault(log_file):
+        print(line)
 
 if __name__ == "__main__":
     main()
-
